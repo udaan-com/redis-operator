@@ -193,16 +193,19 @@ func executeMasterClusterCreation(cr *redisv1beta1.RedisCluster) {
 	logger := generateRedisManagerLogger(cr.Namespace, cr.ObjectMeta.Name)
 	count := cr.Spec.GetReplicaCounts("leader")
 	podName := fmt.Sprintf("%s-%s-", cr.ObjectMeta.Name, "leader")
-	client := configureRedisClient(cr, podName+strconv.Itoa(0))
-	for podCount := 1; podCount <= int(count)-1; podCount++ {
-		completePodName := podName + strconv.Itoa(podCount)
-		ip := getRedisServerIP(RedisDetails{
-			PodName:   completePodName,
-			Namespace: cr.Namespace,
-		})
-		cmd := redis.NewStringCmd("cluster", "meet", ip, "6379")
-		err := client.Process(cmd)
-		logger.Info("MEET EXECUTED", "pod", completePodName, "ip", ip, "err", err)
+	for rootPod := 0; rootPod <= int(count)-2; rootPod++ {
+		client := configureRedisClient(cr, podName+strconv.Itoa(rootPod))
+		rootPodName := podName + strconv.Itoa(rootPod)
+		for podCount := rootPod + 1; podCount <= int(count)-1; podCount++ {
+			currentPodName := podName + strconv.Itoa(podCount)
+			ip := getRedisServerIP(RedisDetails{
+				PodName:   currentPodName,
+				Namespace: cr.Namespace,
+			})
+			cmd := redis.NewStringCmd("cluster", "meet", ip, "6379")
+			err := client.Process(cmd)
+			logger.Info("MEET EXECUTED", "rootPodName", rootPodName, "pod", currentPodName, "ip", ip, "err", err)
+		}
 	}
 }
 
