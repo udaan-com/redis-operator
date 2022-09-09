@@ -172,6 +172,95 @@ func ExecuteFailoverOperation(cr *redisv1beta1.RedisCluster) error {
 	return nil
 }
 
+func ExecuteGracefulFailOverOperation(cr *redisv1beta1.RedisCluster) error {
+	logger := generateRedisManagerLogger(cr.Namespace, cr.ObjectMeta.Name)
+	err := executeClusterForget(cr, "leader")
+	if err != nil {
+		return err
+	}
+	logger.Info("Leaders forgotten")
+	err = executeClusterForget(cr, "follower")
+	if err != nil {
+		return err
+	}
+	logger.Info("Followers forgotten")
+	executeMasterClusterCreation(cr)
+	executeFailoverCommand(cr, "follower")
+	return nil
+}
+
+func executeMasterClusterCreation(cr *redisv1beta1.RedisCluster) {
+	logger := generateRedisManagerLogger(cr.Namespace, cr.ObjectMeta.Name)
+	count := cr.Spec.GetReplicaCounts("leader")
+	podName := fmt.Sprintf("%s-%s-", cr.ObjectMeta.Name, "leader")
+	for rootPod := 0; rootPod <= int(count)-2; rootPod++ {
+		client := configureRedisClient(cr, podName+strconv.Itoa(rootPod))
+		rootPodName := podName + strconv.Itoa(rootPod)
+		for podCount := rootPod + 1; podCount <= int(count)-1; podCount++ {
+			currentPodName := podName + strconv.Itoa(podCount)
+			ip := getRedisServerIP(RedisDetails{
+				PodName:   currentPodName,
+				Namespace: cr.Namespace,
+			})
+			cmd := redis.NewStringCmd("cluster", "meet", ip, "6379")
+			err := client.Process(cmd)
+			logger.Info("MEET EXECUTED", "rootPodName", rootPodName, "pod", currentPodName, "ip", ip, "err", err)
+		}
+	}
+}
+
+func executeClusterForget(cr *redisv1beta1.RedisCluster, role string) error {
+	logger := generateRedisManagerLogger(cr.Namespace, cr.ObjectMeta.Name)
+	count := cr.Spec.GetReplicaCounts(role)
+	podName := fmt.Sprintf("%s-%s-", cr.ObjectMeta.Name, role)
+	for podCount := 0; podCount <= int(count)-1; podCount++ {
+		client := configureRedisClient(cr, podName+strconv.Itoa(podCount))
+		cmd := redis.NewStringCmd("cluster", "nodes")
+		err := client.Process(cmd)
+		if err != nil {
+			return err
+		}
+		nodesResult, err := cmd.Result()
+		if err != nil {
+			return err
+		}
+		if strings.Contains(nodesResult, "myself,slave") {
+			logger.Info("Slave, Disconnecting from master")
+			cmd := redis.NewStringCmd("CLUSTER", "FAILOVER", "TAKEOVER")
+			err = client.Process(cmd)
+			if err != nil {
+				return err
+			}
+		}
+		nodeIds, err := getNodeIds(nodesResult)
+		if err != nil {
+			return err
+		}
+		for nodeCount := 0; nodeCount <= int(len(nodeIds))-1; nodeCount++ {
+			logger.Info("FORGETTING NODE", "podName", podName, "podCount", podCount, "nodeId", nodeIds[nodeCount])
+			cmd := redis.NewStringCmd("CLUSTER", "FORGET", nodeIds[nodeCount])
+			client.Process(cmd)
+		}
+		logger.Info("FORGETTING ALL NODES", "podName", podName, "podCount", podCount)
+	}
+	return nil
+}
+
+func getNodeIds(nodesResult string) ([]string, error) {
+	csvOutput := csv.NewReader(strings.NewReader(nodesResult))
+	csvOutput.Comma = ' '
+	csvOutput.FieldsPerRecord = -1
+	csvOutputRecords, err := csvOutput.ReadAll()
+	if err != nil {
+		return nil, err
+	}
+	var nodeIds []string
+	for i := 0; i < len(csvOutputRecords); i++ {
+		nodeIds = append(nodeIds, csvOutputRecords[i][0])
+	}
+	return nodeIds, nil
+}
+
 // executeFailoverCommand will execute failover command
 func executeFailoverCommand(cr *redisv1beta1.RedisCluster, role string) error {
 	logger := generateRedisManagerLogger(cr.Namespace, cr.ObjectMeta.Name)

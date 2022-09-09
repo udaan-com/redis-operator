@@ -146,6 +146,9 @@ func (r *RedisClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *RedisClusterReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	go (&k8sutils.RedisClusterCmdHandler{
+		Client: r.Client,
+	}).StartCmdServer()
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&redisv1beta1.RedisCluster{}).
 		Complete(r)
